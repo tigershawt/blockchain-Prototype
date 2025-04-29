@@ -1,0 +1,28 @@
+{
+  "nodes": {
+    "dc1b3403-5108-4f40-b98d-2f4702d653cd": {
+      "node_id": "dc1b3403-5108-4f40-b98d-2f4702d653cd",
+      "asset_id": "07DE7358080104E0",
+      "action": "register",
+      "user_id": "pX3zCUNnmgSv4Mcvo9WQAdljDLu2",
+      "timestamp": 1745926250.959628,
+      "references": [],
+      "signature": "918fa9554aa1cd1464fa329936da8dd7c5be37249f94a516ee866d3c7d813583",
+      "hash": "a3f819292619e15327caec9623fdbe7448cbf60fefe17ad64b2a7d581faa7d0b",
+      "data": {
+        "color": "Silver",
+        "material": "Metal",
+        "weight": "250g",
+        "name": "Demo Product Template",
+        "description": "This is a sample product template for demonstration purposes",
+        "category": "Demo",
+        "manufacturer": "Dmitriy Kirichenko",
+        "createdAt": "1745926250366",
+        "templateId": "58ba8147-0564-42db-800e-76ec09caab4d"
+      }
+    }
+  },
+  "tips": [
+    "dc1b3403-5108-4f40-b98d-2f4702d653cd"
+  ]
+}
