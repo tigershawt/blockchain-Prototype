@@ -5,7 +5,11 @@ import uuid
 from typing import Dict, List, Optional, Tuple, Set, Any
 import os
 import random
+import logging
 from flask import Flask, request, jsonify
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('inlock_api')
 
 class Node:
     def __init__(
@@ -67,7 +71,6 @@ class Node:
             data=data.get("data", {})
         )
 
-
 class DAG:
     def __init__(self, storage_path: str = "blockchain_dag.json"):
         self.nodes: Dict[str, Node] = {}
@@ -91,7 +94,7 @@ class DAG:
         
         self.save()
         
-        return True, f"Node {node.node_id} added successfully"
+        return True, node.node_id
     
     def _validate_node(self, node: Node) -> Tuple[bool, str]:
         if node.node_id in self.nodes:
@@ -151,22 +154,19 @@ class DAG:
         asset_nodes.sort(key=lambda x: x.timestamp)
         
         ownership_history = []
-        current_owner = None
         
         for node in asset_nodes:
             if node.action == "register":
-                current_owner = node.user_id
                 ownership_history.append({
-                    "user_id": current_owner,
+                    "user_id": node.user_id,
                     "timestamp": node.timestamp,
                     "node_id": node.node_id,
                     "action": "register"
                 })
             
             elif node.action == "transfer" and "recipient_id" in node.data:
-                current_owner = node.data["recipient_id"]
                 ownership_history.append({
-                    "user_id": current_owner,
+                    "user_id": node.data["recipient_id"],
                     "timestamp": node.timestamp,
                     "node_id": node.node_id,
                     "action": "transfer"
@@ -226,22 +226,6 @@ class DAG:
         
         return tips_list
     
-    def visualize(self) -> str:
-        if not self.nodes:
-            return "Empty DAG"
-        
-        sorted_nodes = sorted(self.nodes.values(), key=lambda x: x.timestamp)
-        
-        lines = []
-        for i, node in enumerate(sorted_nodes):
-            node_repr = f"{i+1}. [{node.node_id[:8]}] {node.action} - Asset: {node.asset_id} - User: {node.user_id}"
-            if node.references:
-                refs = [f"[{ref[:8]}]" for ref in node.references]
-                node_repr += f" - Refs: {', '.join(refs)}"
-            lines.append(node_repr)
-        
-        return "\n".join(lines)
-    
     def verify_integrity(self) -> Tuple[bool, str]:
         for node_id, node in self.nodes.items():
             for ref in node.references:
@@ -255,10 +239,6 @@ class DAG:
         
         return True, "DAG integrity verified"
 
-
-def create_blockchain(storage_path: str = "blockchain_dag.json") -> DAG:
-    return DAG(storage_path=storage_path)
-
 def register_asset(blockchain: DAG, asset_id: str, user_id: str, asset_data: Dict = None) -> Tuple[bool, str]:
     references = blockchain.choose_references()
     
@@ -270,11 +250,7 @@ def register_asset(blockchain: DAG, asset_id: str, user_id: str, asset_data: Dic
         data=asset_data or {}
     )
     
-    success, message = blockchain.add_node(node)
-    if success:
-        return True, node.node_id
-    else:
-        return False, message
+    return blockchain.add_node(node)
 
 def transfer_asset(blockchain: DAG, asset_id: str, from_user_id: str, to_user_id: str) -> Tuple[bool, str]:
     references = blockchain.choose_references()
@@ -287,11 +263,7 @@ def transfer_asset(blockchain: DAG, asset_id: str, from_user_id: str, to_user_id
         data={"recipient_id": to_user_id}
     )
     
-    success, message = blockchain.add_node(node)
-    if success:
-        return True, node.node_id
-    else:
-        return False, message
+    return blockchain.add_node(node)
 
 def stake_asset(blockchain: DAG, asset_id: str, user_id: str, staking_amount: int = 1) -> Tuple[bool, str]:
     references = blockchain.choose_references()
@@ -304,144 +276,198 @@ def stake_asset(blockchain: DAG, asset_id: str, user_id: str, staking_amount: in
         data={"staking_amount": staking_amount}
     )
     
-    success, message = blockchain.add_node(node)
-    if success:
-        return True, node.node_id
-    else:
-        return False, message
-
-def get_user_token_balance(blockchain: DAG, user_id: str) -> int:
-    return blockchain.get_user_staking_balance(user_id)
-
-def get_user_owned_assets(blockchain: DAG, user_id: str) -> List[str]:
-    return blockchain.get_user_assets(user_id)
+    return blockchain.add_node(node)
 
 def verify_asset_ownership(blockchain: DAG, asset_id: str, user_id: str) -> bool:
     ownership_history = blockchain.get_asset_ownership_history(asset_id)
     return ownership_history and ownership_history[-1]["user_id"] == user_id
 
-
 app = Flask(__name__)
-blockchain = create_blockchain()
+blockchain = DAG("blockchain_dag.json")
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok", "service": "InLock Blockchain API"})
 
 @app.route('/process_nfc_tag', methods=['POST'])
-def api_process_nfc_tag():
-    data = request.json
-    tag_id = data.get('tag_id')
-    user_id = data.get('user_id')
-    tag_technologies = data.get('tag_technologies', [])
-    ndef_message = data.get('ndef_message', '')
-    timestamp = data.get('timestamp')
-    
-    if not tag_id or not user_id:
-        return jsonify({"success": False, "result": "Missing required fields", "action": "error", "asset_id": ""}), 400
-    
-    asset_id = tag_id
-    
-    asset_nodes = blockchain.get_asset_nodes(asset_id)
-    register_node = next((node for node in asset_nodes if node.action == "register"), None)
-    
-    if register_node:
-        owner_history = blockchain.get_asset_ownership_history(asset_id)
-        current_owner = owner_history[-1]["user_id"] if owner_history else None
+def process_nfc_tag():
+    try:
+        data = request.json
+        tag_id = data.get('tag_id')
+        user_id = data.get('user_id')
         
-        if current_owner == user_id:
+        if not tag_id or not user_id:
+            return jsonify({"success": False, "message": "Missing tag_id or user_id"}), 400
+        
+        asset_data = {
+            "tag_type": data.get('tag_type', 'NFC'),
+            "tag_technologies": data.get('tag_technologies', []),
+            "ndef_message": data.get('ndef_message', ''),
+            "scanned_timestamp": data.get('timestamp', 0)
+        }
+        
+        asset_exists = False
+        for node in blockchain.nodes.values():
+            if node.asset_id == tag_id and node.action == "register":
+                asset_exists = True
+                break
+        
+        if asset_exists:
+            success, result = stake_asset(blockchain, tag_id, user_id)
             return jsonify({
-                "success": True,
-                "result": "Asset verified, you are the owner",
-                "action": "verify",
-                "asset_id": asset_id
+                "success": success,
+                "result": result,
+                "action": "staking",
+                "asset_id": tag_id
             })
         else:
+            success, result = register_asset(blockchain, tag_id, user_id, asset_data)
             return jsonify({
-                "success": True,
-                "result": f"Asset owned by {current_owner}",
-                "action": "verify",
-                "asset_id": asset_id
+                "success": success,
+                "result": result,
+                "action": "register",
+                "asset_id": tag_id
             })
-    else:
-        return jsonify({
-            "success": True,
-            "result": "Asset not registered yet",
-            "action": "unregistered",
-            "asset_id": asset_id
-        })
+            
+    except Exception as e:
+        logger.error(f"Error processing NFC tag: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/register_asset', methods=['POST'])
 def api_register_asset():
-    data = request.json
-    asset_id = data.get('asset_id')
-    user_id = data.get('user_id')
-    asset_data = data.get('asset_data', {})
-    
-    if not asset_id or not user_id:
-        return jsonify({"success": False, "result": "Missing required fields"}), 400
-    
-    success, result = register_asset(blockchain, asset_id, user_id, asset_data)
-    return jsonify({"success": success, "result": result})
+    try:
+        data = request.json
+        asset_id = data.get('asset_id')
+        user_id = data.get('user_id')
+        asset_data = data.get('asset_data', {})
+        
+        if not asset_id or not user_id:
+            return jsonify({"success": False, "message": "Missing required fields"}), 400
+        
+        success, result = register_asset(blockchain, asset_id, user_id, asset_data)
+        return jsonify({"success": success, "result": result})
+    except Exception as e:
+        logger.error(f"Error in register_asset: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/transfer_asset', methods=['POST'])
 def api_transfer_asset():
-    data = request.json
-    asset_id = data.get('asset_id')
-    from_user_id = data.get('from_user_id')
-    to_user_id = data.get('to_user_id')
-    
-    if not asset_id or not from_user_id or not to_user_id:
-        return jsonify({"success": False, "result": "Missing required fields"}), 400
-    
-    success, result = transfer_asset(blockchain, asset_id, from_user_id, to_user_id)
-    return jsonify({"success": success, "result": result})
+    try:
+        data = request.json
+        asset_id = data.get('asset_id')
+        from_user_id = data.get('from_user_id')
+        to_user_id = data.get('to_user_id')
+        
+        if not asset_id or not from_user_id or not to_user_id:
+            return jsonify({"success": False, "message": "Missing required fields"}), 400
+        
+        success, result = transfer_asset(blockchain, asset_id, from_user_id, to_user_id)
+        return jsonify({"success": success, "result": result})
+    except Exception as e:
+        logger.error(f"Error in transfer_asset: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/stake_asset', methods=['POST'])
 def api_stake_asset():
-    data = request.json
-    asset_id = data.get('asset_id')
-    user_id = data.get('user_id')
-    staking_amount = data.get('staking_amount', 1)
-    
-    if not asset_id or not user_id:
-        return jsonify({"success": False, "result": "Missing required fields"}), 400
-    
-    success, result = stake_asset(blockchain, asset_id, user_id, staking_amount)
-    return jsonify({"success": success, "result": result})
+    try:
+        data = request.json
+        asset_id = data.get('asset_id')
+        user_id = data.get('user_id')
+        staking_amount = data.get('staking_amount', 1)
+        
+        if not asset_id or not user_id:
+            return jsonify({"success": False, "message": "Missing required fields"}), 400
+        
+        success, result = stake_asset(blockchain, asset_id, user_id, staking_amount)
+        return jsonify({"success": success, "result": result})
+    except Exception as e:
+        logger.error(f"Error in stake_asset: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/user_balance/<user_id>', methods=['GET'])
 def api_user_balance(user_id):
-    balance = get_user_token_balance(blockchain, user_id)
-    return jsonify({"user_id": user_id, "balance": balance})
+    try:
+        balance = blockchain.get_user_staking_balance(user_id)
+        return jsonify({"user_id": user_id, "balance": balance})
+    except Exception as e:
+        logger.error(f"Error in user_balance: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/user_assets/<user_id>', methods=['GET'])
 def api_user_assets(user_id):
-    assets = get_user_owned_assets(blockchain, user_id)
-    return jsonify({"user_id": user_id, "assets": assets})
+    try:
+        assets = blockchain.get_user_assets(user_id)
+        return jsonify({"user_id": user_id, "assets": assets})
+    except Exception as e:
+        logger.error(f"Error in user_assets: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/verify_ownership', methods=['GET'])
 def api_verify_ownership():
-    asset_id = request.args.get('asset_id')
-    user_id = request.args.get('user_id')
-    
-    if not asset_id or not user_id:
-        return jsonify({"success": False, "result": "Missing required parameters"}), 400
-    
-    is_owner = verify_asset_ownership(blockchain, asset_id, user_id)
-    return jsonify({"asset_id": asset_id, "user_id": user_id, "is_owner": is_owner})
+    try:
+        asset_id = request.args.get('asset_id')
+        user_id = request.args.get('user_id')
+        
+        if not asset_id or not user_id:
+            return jsonify({"success": False, "message": "Missing required parameters"}), 400
+        
+        is_owner = verify_asset_ownership(blockchain, asset_id, user_id)
+        return jsonify({"asset_id": asset_id, "user_id": user_id, "is_owner": is_owner})
+    except Exception as e:
+        logger.error(f"Error in verify_ownership: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/asset_history/<asset_id>', methods=['GET'])
 def api_asset_history(asset_id):
-    history = blockchain.get_asset_ownership_history(asset_id)
-    return jsonify({"asset_id": asset_id, "history": history})
+    try:
+        history = blockchain.get_asset_ownership_history(asset_id)
+        return jsonify({"asset_id": asset_id, "history": history})
+    except Exception as e:
+        logger.error(f"Error in asset_history: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 @app.route('/asset_data/<asset_id>', methods=['GET'])
 def api_asset_data(asset_id):
-    asset_nodes = blockchain.get_asset_nodes(asset_id)
-    register_node = next((node for node in asset_nodes if node.action == "register"), None)
-    
-    data = {}
-    if register_node and register_node.data:
-        data = {k: str(v) for k, v in register_node.data.items()}
-    
-    return jsonify({"asset_id": asset_id, "data": data})
+    try:
+        asset_nodes = blockchain.get_asset_nodes(asset_id)
+        register_node = next((node for node in asset_nodes if node.action == "register"), None)
+        
+        data = {}
+        if register_node and register_node.data:
+            data = {k: str(v) for k, v in register_node.data.items()}
+        
+        return jsonify({"asset_id": asset_id, "data": data})
+    except Exception as e:
+        logger.error(f"Error in asset_data: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
+
+@app.route('/verify_integrity', methods=['GET'])
+def api_verify_integrity():
+    try:
+        integrity_ok, message = blockchain.verify_integrity()
+        return jsonify({"integrity_ok": integrity_ok, "message": message})
+    except Exception as e:
+        logger.error(f"Error in verify_integrity: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
+
+@app.route('/blockchain_stats', methods=['GET'])
+def api_blockchain_stats():
+    try:
+        stats = {
+            "total_nodes": len(blockchain.nodes),
+            "total_tips": len(blockchain.tips),
+            "unique_assets": len(set(node.asset_id for node in blockchain.nodes.values())),
+            "unique_users": len(set(node.user_id for node in blockchain.nodes.values())),
+            "action_counts": {
+                "register": len([node for node in blockchain.nodes.values() if node.action == "register"]),
+                "transfer": len([node for node in blockchain.nodes.values() if node.action == "transfer"]),
+                "staking": len([node for node in blockchain.nodes.values() if node.action == "staking"])
+            }
+        }
+        return jsonify({"success": True, "stats": stats})
+    except Exception as e:
+        logger.error(f"Error in blockchain_stats: {str(e)}", exc_info=True)
+        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    app.run(host='0.0.0.0', port=5001)
